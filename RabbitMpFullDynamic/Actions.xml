@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<actions>
+  <action id="RabbitMpFullDynamic.CommandWindowAction" text="Open command window" />
+  <action id="RabbitMpFullDynamic.AboutAction" text="About RabbitMpFullDynamic..." />
+
+  <insert group-id="DotPeek.File" position="before" anchor-id="AssemblyExplorerAddItem">
+    <action-group id="RabbitMpFullDynamic.File" text="RabbitMpFullDynamic">
+        <action-ref id="RabbitMpFullDynamic.CommandWindowAction" />
+        <action-ref id="RabbitMpFullDynamic.AboutAction" />
+    </action-group>
+    <action-ref id="RabbitMpFullDynamic.CommandWindowAction" />
+    <separator />
+  </insert>
+</actions>

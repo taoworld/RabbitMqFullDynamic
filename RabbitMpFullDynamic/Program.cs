@@ -10,11 +10,6 @@ namespace RabbitMpFullDynamic
     {
         private static Dictionary<string, RabbitMqConsumer> ServiceConsumerMap = new Dictionary<string, RabbitMqConsumer>();
 
-        private void OnMessagePublished(object sender, MessagePublishEventArgs evtArgs)
-        {
-
-        }
-
         public static void Main(string[] args)
         {
             var listOfThread = new List<Thread>();
@@ -25,11 +20,12 @@ namespace RabbitMpFullDynamic
             while(true) 
             {
                 var inputMsg = Console.ReadLine();
-                if (!inputMsg.Equals("exit", StringComparison.CurrentCultureIgnoreCase)) break;
+                if (inputMsg.Equals("exit", StringComparison.CurrentCultureIgnoreCase)) break;
                 var inputArgs = inputMsg.Split(new char[] { ':' }, StringSplitOptions.RemoveEmptyEntries);
-                if (inputArgs.Length != 2 && inputArgs.Any(input => string.IsNullOrWhiteSpace(input)))
+                if (inputArgs.Length != 2 || inputArgs.Any(input => string.IsNullOrWhiteSpace(input)))
                 {
-                    throw new ArgumentException("Input message is not in correct format!");
+                    Console.WriteLine("Input message is not in correct format!");
+                    continue;
                 }
 
                 var serviceName = inputArgs[0].Trim();

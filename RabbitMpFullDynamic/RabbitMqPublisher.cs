@@ -5,6 +5,9 @@ using System.Text;
 using System.Threading.Tasks;
 using RabbitMQ.Client;
 using System.Collections.Concurrent;
+using EasyNetQ;
+using EasyNetQ.Management.Client;
+using EasyNetQ.Management.Client.Model;
 
 namespace RabbitMpFullDynamic
 {
@@ -12,48 +15,122 @@ namespace RabbitMpFullDynamic
     {
 
         public const string Hostname = "localhost";
-        private const string Login = "tao";
+        private const string User = "tao";
         private const string Password = "tao";
         private const int Port = 5673;
 
-        private static object lockConnection = new object();
-        private static object lockExchage = new object();
-        private static object lockQueue = new object();
+        private static object _lockExchage = new object();
+        private static object _lockQueue = new object();
 
         ////list of <serviceName, virtual hostname>
         //private static ConcurrentDictionary<string, string> ServiceVhostMap = new ConcurrentDictionary<string,string>();
         
         //list of <virtual hostname, connection objects>
-        private static ConcurrentDictionary<string, ConnectionFactory> VhostConnectionMap = new ConcurrentDictionary<string,ConnectionFactory>();
+
+        private static readonly Dictionary<string, ConnectionFactory> VhostConnectionMap = new Dictionary<string, ConnectionFactory>();
+
+        private static readonly Dictionary<string, string> ServiceVirtualHostPublisherMap = new Dictionary<string, string>();
+        //private static readonly Dictionary<string, string> ServiceVirtualHostConsumerMap = new Dictionary<string, string>();
 
         //list of <serviceName, exchange name>
-        private static ConcurrentDictionary<string, string> ServiceExchangeMap = new ConcurrentDictionary<string, string>();
+        private static readonly Dictionary<string, string> ServiceExchangePublisherMap = new Dictionary<string, string>();
+        private static readonly Dictionary<string, string> ServiceExchangeConsumerMap = new Dictionary<string, string>();
         
         //list of <serviceName, queue name>
-        private static ConcurrentDictionary<string, string> ServiceQueueMap = new ConcurrentDictionary<string, string>();
+        private static readonly Dictionary<string, string> ServiceQueuePublisherMap = new Dictionary<string, string>();
+        private static readonly Dictionary<string, string> ServiceQueueConsumerMap = new Dictionary<string, string>();
         
         /// <summary>
         /// Load mappingsfrom somewhere for :
         /// mapping between service name, virtual hostname, exchange name, queue name.
         /// </summary>
-        private static string GetVirtualHostFromService(string serviceName)
+        private string GetVirtualHostFromService(string serviceName, bool isForPublisher)
         {
-            return "myvirtualhost";
+            //var targetMap = isForPublisher ? ServiceVirtualHostPublisherMap : ServiceVirtualHostConsumerMap;
+            var targetMap = ServiceVirtualHostPublisherMap;
+            if (!targetMap.ContainsKey(serviceName))
+            {
+                CreateVirtualHost(serviceName);
+            }
+
+            return targetMap[serviceName];
         }
 
-        private TValue UpdateValueFactory<TKey, TValue>(TKey key, TValue value)
+        private static ManagementClient _managementClient;
+        private readonly object _managementClientLock= new object();
+
+        private ManagementClient GetManagementClient()
         {
-            return value;
+            if (_managementClient == null)
+            {
+                lock (_managementClientLock)
+                {
+                    if (_managementClient == null)
+                    {
+                        _managementClient = new ManagementClient(Hostname, User, Password);
+                    }
+                }
+            }
+            
+            return _managementClient;
+        }
+
+        private void CreateVirtualHost(string serviceName)
+        {
+            bool isExists;
+            var managementClient = GetManagementClient();
+
+            var vhPublisherName = GenerateComponentName(serviceName, ServiceVirtualHostPublisherMap, "VirtualHostPublisher", out isExists);
+            if (!isExists)
+            {
+                var vhHost = managementClient.CreateVirtualHost(vhPublisherName);
+                var user = managementClient.GetUser("tao");
+                managementClient.CreatePermission(new PermissionInfo(user, vhHost));
+            }
+
+            //var vhConsumerName = GenerateComponentName(serviceName, ServiceVirtualHostConsumerMap, "VirtualHostConsumer", out isExists);
+            //if (!isExists)
+            //{
+            //    var vhHost = managementClient.CreateVirtualHost(vhConsumerName);
+            //    var user = managementClient.GetUser("tao");
+            //    managementClient.CreatePermission(new PermissionInfo(user, vhHost));
+                
+            //}
+        }
+
+        private string GenerateComponentName(string serviceName, Dictionary<string, string> existingNames, string componentKey, out bool isExists)
+        {
+            if (existingNames.ContainsKey(serviceName))
+            {
+                isExists = true;
+                return existingNames[serviceName];
+            }
+
+            isExists = false;
+            var componentName = string.Empty;
+            var random = new Random();
+            var found = false;
+            while (!found)
+            {
+                componentName = serviceName + componentKey + random.Next(999999999).ToString().PadLeft(9, '0');
+                if (!existingNames.ContainsKey(componentName))
+                {
+                    existingNames.Add(serviceName, componentName);
+                    found = true;
+                }
+            }
+
+            return componentName;
         }
         
-        public static ConnectionFactory GetConnectionFactory(string serviceName)
+        public ConnectionFactory GetConnectionFactory(string serviceName, bool isPublisher)
         {
             var factory = new ConnectionFactory()
             {
                 HostName = Hostname,
-                UserName = Login,
+                UserName = User,
                 Password = Password,
-                VirtualHost = GetVirtualHostFromService(serviceName),
+                VirtualHost = GetVirtualHostFromService(serviceName, isPublisher),
                 Port = Port
             };
 
@@ -62,89 +139,51 @@ namespace RabbitMpFullDynamic
 
         public string GetExchangeName(IModel model, string serviceName, bool isPublisher)
         {
-            if (ServiceExchangeMap.ContainsKey(serviceName)) return ServiceExchangeMap[serviceName];
-
-            lock (lockExchage)
+            bool isExists;
+            var exchangeName = GenerateComponentName(serviceName,
+                isPublisher ? ServiceExchangePublisherMap : ServiceExchangeConsumerMap,
+                isPublisher ? "PublisherExchage" : "ConsumerExchange", out isExists);
+            if (!isExists)
             {
-                //generate exchang Name
-                var found = false;
-                var random = new Random();
-                while (!found)
-                {
-                    var exchangeName = serviceName + (isPublisher ? "PublisherExchange" : "ConsumerExchange") + random.Next(999999999).ToString().PadLeft(9, '0');
-                    if (ServiceExchangeMap.Values.Contains(exchangeName)) continue;
+                var managementClient = GetManagementClient();
 
-                    if (model == null)
-                    {
-                        throw new ArgumentNullException("model");
-                    }
-
-                    try
-                    {
-                        model.ExchangeDeclare(
-                            exchange: exchangeName, 
-                            type: "fanout");
-                        ServiceExchangeMap.AddOrUpdate(serviceName, exchangeName, UpdateValueFactory);
-                        found = true;
-                    }
-                    catch
-                    {
-                        throw;
-                    }
-                }
+                var vhost = managementClient.GetVhost(GetVirtualHostFromService(serviceName, isPublisher));
+                var exchangeInfo = new ExchangeInfo(exchangeName, "fanout");
+                managementClient.CreateExchange(exchangeInfo, vhost);
             }
 
-            return ServiceExchangeMap[serviceName];
+            return exchangeName;
         }
-            
+
 
         public string GetQueueName(IModel model, string serviceName, bool isPublisher)
         {
-            if (ServiceQueueMap.ContainsKey(serviceName)) return ServiceQueueMap[serviceName];
-
-            lock (lockQueue)
+            bool isExists;
+            var queueName = GenerateComponentName(serviceName, 
+                isPublisher ? ServiceQueuePublisherMap : ServiceQueueConsumerMap,
+                isPublisher ? "PublisherQueue" : "ConsumerQueue", out isExists);
+            if (!isExists)
             {
-                //generate exchang Name
-                var found = false;
-                var random = new Random();
-                while (!found)
-                {
-                    var queueName = serviceName + (isPublisher ? "PublisherQueue" : "ConsumerQueue") + random.Next(999999999).ToString().PadLeft(9, '0');
-                    if (ServiceQueueMap.Values.Contains(queueName)) continue;
+                var managementClient = GetManagementClient();
 
-                    if (model == null)
-                    {
-                        throw new ArgumentNullException("model");
-                    }
-
-                    try
-                    {
-                        model.QueueDeclare(
-                            queue: queueName,
-                            durable: false,
-                            exclusive: false,
-                            autoDelete: false,
-                            arguments: null);
-                        ServiceQueueMap.AddOrUpdate(serviceName, queueName, UpdateValueFactory);
-                        found = true;
-                    }
-                    catch
-                    {
-                        throw;
-                    }
-                }
+                var vhost = managementClient.GetVhost(GetVirtualHostFromService(serviceName, isPublisher));
+                var queueInfo = new QueueInfo(queueName);
+                managementClient.CreateQueue(queueInfo, vhost);
             }
 
-            return ServiceQueueMap[serviceName];
+            return queueName;
         }
 
         public MessagePublishEventArgs SentMessage(string serviceName, string message)
         {
             var eventArgs = new MessagePublishEventArgs() { ServiceName = serviceName };
-            var factory = GetConnectionFactory(serviceName);
-            using(var pubisherConnection = factory.CreateConnection())
+            var factoryPublisher = GetConnectionFactory(serviceName, true);
+            var factoryConsumer = GetConnectionFactory(serviceName, false);
+            using (var pubisherConnection = factoryPublisher.CreateConnection())
+            using (var consumerConnection = factoryConsumer.CreateConnection())
             {
                 using (var pubisherModel = pubisherConnection.CreateModel())
+                using (var consumerModel = consumerConnection.CreateModel())
                 {
                     //set source exchange
                     var exchangePublisher = GetExchangeName(pubisherModel, serviceName, true);
@@ -155,9 +194,9 @@ namespace RabbitMpFullDynamic
                         routingKey:"");
 
                     //set destination exchange
-                    var exchangeConsumer = GetExchangeName(pubisherModel, serviceName, false);
-                    var queueConsumer = GetQueueName(pubisherModel, serviceName, false);
-                    pubisherModel.QueueBind(
+                    var exchangeConsumer = GetExchangeName(consumerModel, serviceName, false);
+                    var queueConsumer = GetQueueName(consumerModel, serviceName, false);
+                    consumerModel.QueueBind(
                         queue: queueConsumer, 
                         exchange: exchangeConsumer,
                         routingKey: "");
@@ -172,11 +211,10 @@ namespace RabbitMpFullDynamic
 
                     eventArgs.ConsumerExchangeName = exchangeConsumer;
                     eventArgs.ConsumerQueueName = queueConsumer;
-                    eventArgs.ConsumerVirtualHostName = GetVirtualHostFromService(serviceName);
+                    eventArgs.ConsumerVirtualHostName = GetVirtualHostFromService(serviceName, false);
                 }
             }
-
-
+            
             return eventArgs;
         }
     }
